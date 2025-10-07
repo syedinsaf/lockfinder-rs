@@ -5,3 +5,10 @@ edition = "2024"
 
 [dependencies]
 regex = "1.11.3"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging"   # For GetCommandLineW & CommandLineToArgvW
+] }
