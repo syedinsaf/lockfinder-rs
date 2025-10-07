@@ -10,7 +10,7 @@ use regex::Regex;
 // Embed handle.exe (which is actually handle64.exe renamed)
 const HANDLE_EXE: &[u8] = include_bytes!("../assets/handle.exe");
 
-// ===== WINDOWS ADMIN ELEVATION (affinity-rs style) =====
+// ===== WINDOWS ADMIN ELEVATION =====
 #[cfg(target_os = "windows")]
 fn is_elevated() -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -68,7 +68,6 @@ fn relaunch_elevated() -> ! {
             params.push(' ');
         }
         if arg.contains(' ') || arg.contains('"') {
-            // Escape quotes and wrap in quotes
             let escaped = arg.replace('"', "\\\"");
             params.push('"');
             params.push_str(&escaped);
@@ -123,6 +122,25 @@ fn pause_before_exit() {
     let _ = io::stdin().read_line(&mut dummy);
 }
 
+// ===== CLEANUP HANDLER =====
+struct TempFileGuard {
+    path: PathBuf,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        TempFileGuard { path }
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if self.path.exists() {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 // ===== MAIN PROGRAM =====
 fn main() {
     // Auto-elevate on Windows if needed
@@ -137,6 +155,7 @@ fn main() {
 
     if args.len() < 2 {
         print_usage();
+        pause_before_exit();
         return;
     }
 
@@ -152,12 +171,14 @@ fn main() {
         } else {
             eprintln!("❌ Unexpected extra argument: {}", arg);
             print_usage();
+            pause_before_exit();
             exit(1);
         }
     }
 
     if target_path.is_empty() {
         print_usage();
+        pause_before_exit();
         return;
     }
 
@@ -169,6 +190,9 @@ fn main() {
             exit(1);
         }
     };
+
+    // Create guard to ensure cleanup on exit
+    let _guard = TempFileGuard::new(handle_exe_path.clone());
 
     println!("🔍 Searching for processes locking: {}\n", target_path);
 
@@ -193,6 +217,7 @@ fn main() {
     if processes.is_empty() {
         println!("✅ No processes found locking this file/folder");
         println!("   The file might be free to use now!");
+        pause_before_exit();
         return;
     }
 
@@ -229,6 +254,7 @@ fn main() {
             println!("🛑 Killing system processes is DISABLED by default.");
             println!("   If you are certain this is safe, rerun with --force");
             println!("❌ Action cancelled. No processes were killed.");
+            pause_before_exit();
         }
     } else {
         println!("\n⚠️  Do you want to kill these processes? (y/n): ");
@@ -238,9 +264,14 @@ fn main() {
                 kill_processes(processes);
             } else {
                 println!("❌ Cancelled. No processes were killed.");
+                pause_before_exit();
             }
+        } else {
+            println!("❌ Failed to read input.");
+            pause_before_exit();
         }
     }
+    // TempFileGuard automatically cleans up handle.exe here
 }
 
 fn is_system_process(name: &str) -> bool {
@@ -316,23 +347,48 @@ fn kill_processes(processes: Vec<(String, u32)>) {
     for (name, pid) in &processes {
         println!("   Killing {} (PID: {})...", name, pid);
 
-        let output = Command::new("taskkill")
+        // Spawn taskkill with timeout
+        let child = Command::new("taskkill")
             .arg("/F")
+            .arg("/T")  // Kill process tree
             .arg("/PID")
             .arg(pid.to_string())
-            .output();
+            .spawn();
 
-        match output {
-            Ok(result) => {
-                if result.status.success() {
-                    println!("   ✅ Successfully killed {} (PID: {})", name, pid);
-                } else {
-                    let stderr = String::from_utf8_lossy(&result.stderr);
-                    println!("   ❌ Failed to kill {}: {}", name, stderr.trim());
+        match child {
+            Ok(mut process) => {
+                // Wait up to 5 seconds for taskkill to complete
+                let timeout = Duration::from_secs(5);
+                let start = std::time::Instant::now();
+                
+                loop {
+                    match process.try_wait() {
+                        Ok(Some(status)) => {
+                            if status.success() {
+                                println!("   ✅ Successfully killed {} (PID: {})", name, pid);
+                            } else {
+                                println!("   ❌ Failed to kill {} (PID: {})", name, pid);
+                            }
+                            break;
+                        }
+                        Ok(None) => {
+                            // Process still running
+                            if start.elapsed() >= timeout {
+                                let _ = process.kill();
+                                println!("   ⚠️  Timeout killing {} (PID: {}) - forcefully terminated taskkill", name, pid);
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(e) => {
+                            println!("   ❌ Error checking taskkill status: {}", e);
+                            break;
+                        }
+                    }
                 }
             }
             Err(e) => {
-                println!("   ❌ Error running taskkill: {}", e);
+                println!("   ❌ Error spawning taskkill: {}", e);
             }
         }
     }
