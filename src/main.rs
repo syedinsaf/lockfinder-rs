@@ -5,12 +5,13 @@ use std::path::PathBuf;
 use std::process::{Command, exit};
 use std::thread;
 use std::time::Duration;
+use std::collections::HashSet;
 use regex::Regex;
 
 // Embed handle.exe (which is actually handle64.exe renamed)
 const HANDLE_EXE: &[u8] = include_bytes!("../assets/handle.exe");
 
-// ===== WINDOWS ADMIN ELEVATION =====
+// Windows Admin Elevation
 #[cfg(target_os = "windows")]
 fn is_elevated() -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -122,7 +123,7 @@ fn pause_before_exit() {
     let _ = io::stdin().read_line(&mut dummy);
 }
 
-// ===== CLEANUP HANDLER =====
+// Cleanup Handler 
 struct TempFileGuard {
     path: PathBuf,
 }
@@ -141,7 +142,7 @@ impl Drop for TempFileGuard {
     }
 }
 
-// ===== MAIN PROGRAM =====
+// Main Logic
 fn main() {
     // Auto-elevate on Windows if needed
     #[cfg(target_os = "windows")]
@@ -159,7 +160,7 @@ fn main() {
         return;
     }
 
-    // Parse arguments: support --force anywhere, exactly one path
+    // Parse arguments
     let mut force = false;
     let mut target_path = String::new();
 
@@ -182,6 +183,37 @@ fn main() {
         return;
     }
 
+    // Validate the path exists
+    let target_path = match fs::canonicalize(&target_path) {
+        Ok(canonical_path) => {
+            // Convert back to regular path (strip \\?\ prefix if present)
+            let path_str = canonical_path.to_string_lossy();
+            if path_str.starts_with(r"\\?\") {
+                path_str[4..].to_string()
+            } else {
+                path_str.to_string()
+            }
+        },
+        Err(e) => {
+            match e.kind() {
+                io::ErrorKind::NotFound => {
+                    eprintln!("❌ File or folder not found: {}", target_path);
+                    eprintln!("💡 Please check the path and try again.");
+                },
+                io::ErrorKind::PermissionDenied => {
+                    eprintln!("❌ Permission denied accessing: {}", target_path);
+                    eprintln!("💡 The path might be in a restricted system folder.");
+                },
+                _ => {
+                    eprintln!("❌ Cannot access path: {}", e);
+                    eprintln!("💡 Path: {}", target_path);
+                }
+            }
+            pause_before_exit();
+            exit(1);
+        }
+    };
+
     let handle_exe_path = match extract_handle_exe() {
         Ok(path) => path,
         Err(e) => {
@@ -202,10 +234,32 @@ fn main() {
         .arg(&target_path)
         .output()
     {
-        Ok(output) => output,
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("❌ handle.exe failed with error:");
+                eprintln!("{}", stderr.trim());
+                eprintln!("💡 This might indicate insufficient permissions or an invalid path.");
+                pause_before_exit();
+                exit(1);
+            }
+            output
+        },
         Err(e) => {
-            eprintln!("❌ Failed to run handle.exe: {}", e);
-            eprintln!("💡 This usually means the tool lacks permissions.");
+            match e.kind() {
+                io::ErrorKind::NotFound => {
+                    eprintln!("❌ Failed to execute handle.exe: tool not found");
+                    eprintln!("💡 The embedded tool may have failed to extract properly.");
+                },
+                io::ErrorKind::PermissionDenied => {
+                    eprintln!("❌ Permission denied executing handle.exe");
+                    eprintln!("💡 Antivirus may be blocking execution. Try adding an exception.");
+                },
+                _ => {
+                    eprintln!("❌ Failed to run handle.exe: {}", e);
+                    eprintln!("💡 This usually means the tool lacks permissions or was blocked.");
+                }
+            }
             pause_before_exit();
             exit(1);
         }
@@ -315,6 +369,7 @@ fn extract_handle_exe() -> Result<PathBuf, Box<dyn std::error::Error>> {
 
 fn parse_handle_output(output: &str, target_path: &str) -> Vec<(String, u32)> {
     let mut processes = Vec::new();
+    let mut seen_pids = HashSet::new();
     let target_lower = target_path.to_lowercase();
 
     let re = match Regex::new(r"^(.+?)\s+pid:\s*(\d+)") {
@@ -330,10 +385,12 @@ fn parse_handle_output(output: &str, target_path: &str) -> Vec<(String, u32)> {
 
         if let Some(caps) = re.captures(trimmed) {
             let name = caps.get(1).map_or("", |m| m.as_str()).trim().to_string();
-            let pid: u32 = caps.get(2).map_or(0, |m| m.as_str().parse().unwrap_or(0));
-
-            if pid > 0 && !name.is_empty() && !processes.iter().any(|(_, p)| p == &pid) {
-                processes.push((name, pid));
+            if let Some(pid_str) = caps.get(2) {
+                if let Ok(pid) = pid_str.as_str().parse::<u32>() {
+                    if !name.is_empty() && seen_pids.insert(pid) {
+                        processes.push((name, pid));
+                    }
+                }
             }
         }
     }
