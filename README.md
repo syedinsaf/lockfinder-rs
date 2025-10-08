@@ -5,7 +5,9 @@
 A Windows command-line tool to identify and terminate processes that are locking files or folders.
 
 </div>
+
 ---
+
 ## Description
 
 lockfinder-rs helps you resolve situations where Windows prevents you from deleting, renaming, or moving files because they are in use by another process. The tool identifies which processes have handles on the specified file or folder and provides options to terminate those processes.
