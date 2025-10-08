@@ -160,7 +160,7 @@ This tool embeds handle.exe from Sysinternals Suite. Please ensure compliance wi
 
 ## Disclaimer
 
-**USE AT YOUR OWN RISK**. This tool can terminate processes and cause data loss. The authors are not responsible for any damage, data loss, system instability, or other issues that may result from using this tool. Always ensure you have backups of important data before using this tool.
+**USE AT YOUR OWN RISK**. This tool can terminate processes and cause data loss. The author are not responsible for any damage, data loss, system instability, or other issues that may result from using this tool. Always ensure you have backups of important data before using this tool.
 
 ## Support
 
